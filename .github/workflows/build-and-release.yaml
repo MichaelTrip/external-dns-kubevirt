@@ -2,6 +2,11 @@ name: 🚀 Build & Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version-override:
+        description: 'Force a specific release version (e.g. v1.0.0). Leave blank to auto-compute from commit history.'
+        required: false
+        default: ''
   push:
     branches:
       - "main"
@@ -35,51 +40,60 @@ jobs:
         run: |
           set -e
 
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          VERSION_OVERRIDE="${{ github.event.inputs.version-override }}"
+
+          if [ "${{ github.ref }}" = "refs/heads/main" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             IS_MAIN="true"
 
-            # Get the latest git tag, or default to v0.0.0
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-            echo "Latest git tag: $LATEST_TAG"
-
-            # Extract version numbers (remove 'v' prefix)
-            VERSION=${LATEST_TAG#v}
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-
-            MAJOR=${MAJOR:-0}
-            MINOR=${MINOR:-0}
-            PATCH=${PATCH:-0}
-
-            # Analyze commit messages since last tag to determine bump type
-            if [ "$LATEST_TAG" != "v0.0.0" ]; then
-              COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"%s")
+            if [ -n "$VERSION_OVERRIDE" ]; then
+              # Manual override: use exactly what the user provided
+              echo "⚠️  Version override: $VERSION_OVERRIDE"
+              DOCKER_TAG="$VERSION_OVERRIDE"
+              GIT_TAG="$VERSION_OVERRIDE"
             else
-              COMMITS=$(git log --pretty=format:"%s")
+              # Get the latest git tag, or default to v0.0.0
+              LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+              echo "Latest git tag: $LATEST_TAG"
+
+              # Extract version numbers (remove 'v' prefix)
+              VERSION=${LATEST_TAG#v}
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+              MAJOR=${MAJOR:-0}
+              MINOR=${MINOR:-0}
+              PATCH=${PATCH:-0}
+
+              # Analyze commit messages since last tag to determine bump type
+              if [ "$LATEST_TAG" != "v0.0.0" ]; then
+                COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"%s")
+              else
+                COMMITS=$(git log --pretty=format:"%s")
+              fi
+
+              # Check for breaking changes or major version indicators
+              if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|major:"; then
+                MAJOR=$((MAJOR + 1))
+                MINOR=0
+                PATCH=0
+                BUMP_TYPE="major"
+              # Check for features or minor version indicators
+              elif echo "$COMMITS" | grep -qiE "^feat|^feature|minor:"; then
+                MINOR=$((MINOR + 1))
+                PATCH=0
+                BUMP_TYPE="minor"
+              # Default to patch version bump
+              else
+                PATCH=$((PATCH + 1))
+                BUMP_TYPE="patch"
+              fi
+
+              NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+              echo "Bump type: $BUMP_TYPE"
+              echo "New tag: $NEW_TAG"
+
+              DOCKER_TAG="$NEW_TAG"
+              GIT_TAG="$NEW_TAG"
             fi
-
-            # Check for breaking changes or major version indicators
-            if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|major:"; then
-              MAJOR=$((MAJOR + 1))
-              MINOR=0
-              PATCH=0
-              BUMP_TYPE="major"
-            # Check for features or minor version indicators
-            elif echo "$COMMITS" | grep -qiE "^feat|^feature|minor:"; then
-              MINOR=$((MINOR + 1))
-              PATCH=0
-              BUMP_TYPE="minor"
-            # Default to patch version bump
-            else
-              PATCH=$((PATCH + 1))
-              BUMP_TYPE="patch"
-            fi
-
-            NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
-            echo "Bump type: $BUMP_TYPE"
-            echo "New tag: $NEW_TAG"
-
-            DOCKER_TAG="$NEW_TAG"
-            GIT_TAG="$NEW_TAG"
           else
             IS_MAIN="false"
 
@@ -206,6 +220,45 @@ jobs:
             git push origin "$GIT_TAG"
             echo "✅ Created and pushed tag: $GIT_TAG"
           fi
+
+  # Create a GitHub Release on main branch
+  create-github-release:
+    runs-on: ubuntu-latest
+    needs: [determine-tag, build-container, create-git-tag]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog from commits
+        id: changelog
+        run: |
+          LATEST_TAG="${{ needs.determine-tag.outputs.git-tag }}"
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          echo "$CHANGELOG" > /tmp/changelog.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.determine-tag.outputs.git-tag }}
+          name: Release ${{ needs.determine-tag.outputs.git-tag }}
+          body_path: /tmp/changelog.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Update deployment manifest with latest image tag on main
   update-deployment:
