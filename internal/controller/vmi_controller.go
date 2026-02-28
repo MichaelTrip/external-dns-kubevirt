@@ -33,6 +33,9 @@ const (
 	defaultTTL = dnsendpointv1alpha1.TTL(300)
 	// multusInfoSource is the infoSource value that indicates multus-status IPs.
 	multusInfoSource = "multus-status"
+	// guestAgentInfoSource is the infoSource value set by the QEMU guest agent.
+	// It provides a richer IP list (iface.IPs) including IPv6 global unicast addresses.
+	guestAgentInfoSource = "guest-agent"
 )
 
 // AddDNSEndpointToScheme registers the DNSEndpoint CRD types with the given scheme.
@@ -77,13 +80,15 @@ func (r *VirtualMachineInstanceReconciler) Reconcile(ctx context.Context, req ct
 		return ctrl.Result{}, r.deleteEndpointIfExists(ctx, vmi)
 	}
 
-	// Annotation is present — collect multus-status IPs.
-	// If none are available yet, do nothing: neither create nor delete.
-	ipv4Addrs, ipv6Addrs := extractMultusIPs(vmi)
+	// Annotation is present — collect the best available IPs.
+	// guest-agent IPs are preferred (richer data); multus-status is the fallback.
+	// If neither source yields IPs yet, do nothing: neither create nor delete.
+	ipv4Addrs, ipv6Addrs, ipSource := extractBestIPs(vmi)
 	if len(ipv4Addrs) == 0 && len(ipv6Addrs) == 0 {
-		logger.Info("hostname annotation present but no multus-status IPs available yet, skipping", "vmi", req.NamespacedName)
+		logger.Info("hostname annotation present but no IPs available yet, skipping", "vmi", req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
+	logger.Info("resolved IPs", "vmi", req.NamespacedName, "source", ipSource, "ipv4", ipv4Addrs, "ipv6", ipv6Addrs)
 
 	ttl := parseTTL(vmi.Annotations[annotationTTL])
 	hostnames := parseHostnames(hostname)
@@ -124,10 +129,57 @@ func (r *VirtualMachineInstanceReconciler) deleteEndpointIfExists(ctx context.Co
 	return r.Delete(ctx, endpoint)
 }
 
-// extractMultusIPs returns IPv4 and IPv6 addresses from interfaces whose infoSource contains "multus-status".
+// extractBestIPs returns IPv4 and IPv6 addresses for the VMI using the best
+// available infoSource. The guest-agent source is preferred because it exposes
+// the full iface.IPs list (including global IPv6 unicast). multus-status is
+// used as a fallback, reading only the single iface.IP field.
+//
+// The returned source string indicates which source was used ("guest-agent" or
+// "multus-status").
+func extractBestIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []string, source string) {
+	gaV4, gaV6 := extractGuestAgentIPs(vmi)
+	if len(gaV4) > 0 || len(gaV6) > 0 {
+		return gaV4, gaV6, guestAgentInfoSource
+	}
+	mV4, mV6 := extractMultusIPs(vmi)
+	if len(mV4) > 0 || len(mV6) > 0 {
+		return mV4, mV6, multusInfoSource
+	}
+	return nil, nil, ""
+}
+
+// extractGuestAgentIPs returns IPv4 and IPv6 addresses from interfaces whose
+// infoSource contains "guest-agent", using the full iface.IPs list.
+// Link-local IPv6 addresses (fe80::/10) are skipped.
+func extractGuestAgentIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []string) {
+	for _, iface := range vmi.Status.Interfaces {
+		if !containsInfoSource(iface.InfoSource, guestAgentInfoSource) {
+			continue
+		}
+		for _, addr := range iface.IPs {
+			addr = strings.TrimSpace(addr)
+			if addr == "" {
+				continue
+			}
+			ip := net.ParseIP(addr)
+			if ip == nil {
+				continue
+			}
+			if ip.To4() != nil {
+				ipv4 = append(ipv4, addr)
+			} else if ip.To16() != nil && !ip.IsLinkLocalUnicast() {
+				ipv6 = append(ipv6, addr)
+			}
+		}
+	}
+	return
+}
+
+// extractMultusIPs returns IPv4 and IPv6 addresses from interfaces whose
+// infoSource contains "multus-status", using the single iface.IP field.
 func extractMultusIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []string) {
 	for _, iface := range vmi.Status.Interfaces {
-		if !containsMultusSource(iface.InfoSource) {
+		if !containsInfoSource(iface.InfoSource, multusInfoSource) {
 			continue
 		}
 		addr := strings.TrimSpace(iface.IP)
@@ -147,10 +199,11 @@ func extractMultusIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []stri
 	return
 }
 
-// containsMultusSource returns true if the infoSource field contains "multus-status".
-func containsMultusSource(infoSource string) bool {
+// containsInfoSource returns true if the comma-separated infoSource field
+// contains the given source token (exact match after trimming spaces).
+func containsInfoSource(infoSource, source string) bool {
 	for _, part := range strings.Split(infoSource, ",") {
-		if strings.TrimSpace(part) == multusInfoSource {
+		if strings.TrimSpace(part) == source {
 			return true
 		}
 	}
@@ -208,7 +261,8 @@ func buildEndpoints(hostnames, ipv4, ipv6 []string, ttl dnsendpointv1alpha1.TTL)
 
 // vmiChangedPredicate filters VMI update events to those where either the
 // hostname annotation or the status.interfaces list has actually changed.
-// Create and delete events are always passed through.
+// The full Interfaces slice comparison covers both iface.IP (multus-status)
+// and iface.IPs (guest-agent) fields. Create and delete events always pass through.
 var vmiChangedPredicate = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		oldVMI, ok1 := e.ObjectOld.(*kubevirtv1.VirtualMachineInstance)

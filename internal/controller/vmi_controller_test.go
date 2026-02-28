@@ -8,6 +8,89 @@ import (
 	dnsendpointv1alpha1 "sigs.k8s.io/external-dns/endpoint"
 )
 
+// ---------- extractGuestAgentIPs ----------
+
+func TestExtractGuestAgentIPs_Empty(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	v4, v6 := extractGuestAgentIPs(vmi)
+	if len(v4) != 0 || len(v6) != 0 {
+		t.Errorf("expected no IPs, got v4=%v v6=%v", v4, v6)
+	}
+}
+
+func TestExtractGuestAgentIPs_NoGuestAgent(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{IP: "10.0.0.1", IPs: []string{"10.0.0.1"}, InfoSource: "multus-status"},
+	}
+	v4, v6 := extractGuestAgentIPs(vmi)
+	if len(v4) != 0 || len(v6) != 0 {
+		t.Errorf("expected no IPs from non-guest-agent source, got v4=%v v6=%v", v4, v6)
+	}
+}
+
+func TestExtractGuestAgentIPs_IPv4Only(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{
+			IP:         "192.168.99.51",
+			IPs:        []string{"192.168.99.51"},
+			InfoSource: "domain, guest-agent, multus-status",
+		},
+	}
+	v4, v6 := extractGuestAgentIPs(vmi)
+	if len(v4) != 1 || v4[0] != "192.168.99.51" {
+		t.Errorf("expected v4=[192.168.99.51], got %v", v4)
+	}
+	if len(v6) != 0 {
+		t.Errorf("expected no IPv6, got %v", v6)
+	}
+}
+
+func TestExtractGuestAgentIPs_LinkLocalSkipped(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{
+			IP: "192.168.99.51",
+			IPs: []string{
+				"192.168.99.51",
+				"2a02:a44d:67b4:499:50a3:24ff:fea7:fdbb", // global unicast → keep
+				"fe80::50a3:24ff:fea7:fdbb",              // link-local → skip
+			},
+			InfoSource: "domain, guest-agent, multus-status",
+		},
+	}
+	v4, v6 := extractGuestAgentIPs(vmi)
+	if len(v4) != 1 || v4[0] != "192.168.99.51" {
+		t.Errorf("unexpected v4: %v", v4)
+	}
+	if len(v6) != 1 || v6[0] != "2a02:a44d:67b4:499:50a3:24ff:fea7:fdbb" {
+		t.Errorf("expected one global IPv6, got %v", v6)
+	}
+}
+
+func TestExtractGuestAgentIPs_MultipleInterfaces(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{
+			IPs:        []string{"10.0.0.1"},
+			InfoSource: "guest-agent",
+		},
+		{
+			IPs:        []string{"10.0.0.2"},
+			InfoSource: "multus-status", // not guest-agent, should be skipped
+		},
+		{
+			IPs:        []string{"10.0.0.3"},
+			InfoSource: "guest-agent",
+		},
+	}
+	v4, _ := extractGuestAgentIPs(vmi)
+	if len(v4) != 2 {
+		t.Fatalf("expected 2 IPv4, got %v", v4)
+	}
+}
+
 // ---------- extractMultusIPs ----------
 
 func TestExtractMultusIPs_EmptyInterfaces(t *testing.T) {
@@ -86,25 +169,98 @@ func TestExtractMultusIPs_CommaSeperatedInfoSource(t *testing.T) {
 	}
 }
 
-// ---------- containsMultusSource ----------
+// ---------- extractBestIPs ----------
 
-func TestContainsMultusSource(t *testing.T) {
+func TestExtractBestIPs_GuestAgentPreferredOverMultus(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{
+			IP:         "192.168.99.51",
+			IPs:        []string{"192.168.99.51", "2a02:a44d:67b4:1::1"},
+			InfoSource: "domain, guest-agent, multus-status",
+		},
+	}
+	v4, v6, source := extractBestIPs(vmi)
+	if source != guestAgentInfoSource {
+		t.Errorf("expected source=%q, got %q", guestAgentInfoSource, source)
+	}
+	if len(v4) != 1 || v4[0] != "192.168.99.51" {
+		t.Errorf("unexpected v4: %v", v4)
+	}
+	if len(v6) != 1 || v6[0] != "2a02:a44d:67b4:1::1" {
+		t.Errorf("unexpected v6: %v", v6)
+	}
+}
+
+func TestExtractBestIPs_FallsBackToMultusWhenNoGuestAgent(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{IP: "10.0.0.5", InfoSource: "multus-status"},
+	}
+	v4, _, source := extractBestIPs(vmi)
+	if source != multusInfoSource {
+		t.Errorf("expected source=%q, got %q", multusInfoSource, source)
+	}
+	if len(v4) != 1 || v4[0] != "10.0.0.5" {
+		t.Errorf("unexpected v4: %v", v4)
+	}
+}
+
+func TestExtractBestIPs_NoIPs(t *testing.T) {
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{IP: "10.0.0.1", InfoSource: "domain"},
+	}
+	v4, v6, source := extractBestIPs(vmi)
+	if source != "" {
+		t.Errorf("expected empty source, got %q", source)
+	}
+	if len(v4) != 0 || len(v6) != 0 {
+		t.Errorf("expected no IPs, got v4=%v v6=%v", v4, v6)
+	}
+}
+
+func TestExtractBestIPs_GuestAgentLinkLocalOnlyFallsToMultus(t *testing.T) {
+	// Guest-agent only reports link-local → stripped, so we fall back to multus.
+	vmi := &kubevirtv1.VirtualMachineInstance{}
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{
+			IP:         "10.0.0.5",
+			IPs:        []string{"fe80::1"}, // link-local only
+			InfoSource: "guest-agent, multus-status",
+		},
+	}
+	v4, _, source := extractBestIPs(vmi)
+	if source != multusInfoSource {
+		t.Errorf("expected fallback to multus-status, got source=%q", source)
+	}
+	if len(v4) != 1 || v4[0] != "10.0.0.5" {
+		t.Errorf("unexpected v4: %v", v4)
+	}
+}
+
+// ---------- containsInfoSource ----------
+
+func TestContainsInfoSource(t *testing.T) {
 	tests := []struct {
 		infoSource string
+		source     string
 		want       bool
 	}{
-		{"multus-status", true},
-		{"domain,multus-status", true},
-		{"multus-status,guest-agent", true},
-		{"domain", false},
-		{"guest-agent", false},
-		{"", false},
-		{"multus", false},
+		{"multus-status", "multus-status", true},
+		{"domain,multus-status", "multus-status", true},
+		{"multus-status,guest-agent", "multus-status", true},
+		{"domain", "multus-status", false},
+		{"guest-agent", "multus-status", false},
+		{"", "multus-status", false},
+		{"multus", "multus-status", false},
+		{"guest-agent", "guest-agent", true},
+		{"domain, guest-agent, multus-status", "guest-agent", true},
 	}
 	for _, tt := range tests {
-		got := containsMultusSource(tt.infoSource)
+		got := containsInfoSource(tt.infoSource, tt.source)
 		if got != tt.want {
-			t.Errorf("containsMultusSource(%q) = %v, want %v", tt.infoSource, got, tt.want)
+			t.Errorf("containsInfoSource(%q, %q) = %v, want %v", tt.infoSource, tt.source, got, tt.want)
 		}
 	}
 }

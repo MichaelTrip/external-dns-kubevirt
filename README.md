@@ -4,7 +4,7 @@ A Kubernetes controller that automatically creates and manages [External-DNS](ht
 
 ## How it works
 
-The controller watches all `VirtualMachineInstance` (VMI) resources cluster-wide. When a VMI has the `external-dns.alpha.kubernetes.io/hostname` annotation and has IP addresses available from Multus interfaces, the controller creates or updates a `DNSEndpoint` CR in the same namespace.
+The controller watches all `VirtualMachineInstance` (VMI) resources cluster-wide. When a VMI has the `external-dns.alpha.kubernetes.io/hostname` annotation **and** IP addresses are available from a supported interface source, the controller creates or updates a `DNSEndpoint` CR in the same namespace.
 
 External-DNS reads these `DNSEndpoint` CRs via its built-in `crd` source and manages the actual DNS records in your provider.
 
@@ -13,8 +13,8 @@ VirtualMachineInstance (annotated)
         │
         ▼
   external-dns-kubevirt controller
-        │  extracts IPs from .status.interfaces
-        │  where infoSource contains "multus-status"
+        │  resolves IPs from .status.interfaces
+        │  priority: guest-agent → multus-status
         ▼
      DNSEndpoint CR (A + AAAA records)
         │
@@ -84,20 +84,49 @@ spec:
 
 ## IP address selection
 
-The controller only uses IP addresses from network interfaces where the `infoSource` field **contains** `multus-status`. This field is set in `VirtualMachineInstance.status.interfaces[].infoSource` by the KubeVirt Multus integration.
+The controller selects IP addresses using a two-source priority scheme based on the `infoSource` field in `VirtualMachineInstance.status.interfaces[]`:
 
-- IPv4 addresses (`net.ParseIP().To4() != nil`) → `A` records
-- IPv6 addresses (`net.ParseIP().To16() != nil`, not IPv4) → `AAAA` records
+| Priority | Source | Field used | Notes |
+|---|---|---|---|
+| 1 (preferred) | `guest-agent` | `iface.IPs` (full list) | Available when `qemu-guest-agent` is installed in the VM. Link-local IPv6 (`fe80::/10`) addresses are skipped. |
+| 2 (fallback) | `multus-status` | `iface.IP` (single IP) | Always available when Multus CNI is configured. |
+
+The `infoSource` field can contain multiple comma-separated values (e.g. `domain, guest-agent, multus-status`). The controller checks for each source independently.
+
+### Why prefer the guest-agent?
+
+The `guest-agent` source populates `iface.IPs` with all addresses assigned to the interface, including global IPv6 unicast addresses. The `multus-status` source only sets the single `iface.IP` field (typically the primary IPv4 address).
+
+### Behaviour table
+
+| Annotation | IPs available | Action |
+|---|---|---|
+| ❌ absent | any | Delete existing `DNSEndpoint` |
+| ✅ present | ❌ none yet | Do nothing — wait for next interface update |
+| ✅ present | ✅ guest-agent IPs | Create/update `DNSEndpoint` using `iface.IPs` |
+| ✅ present | ✅ multus-status only | Create/update `DNSEndpoint` using `iface.IP` |
+
+- IPv4 addresses → `A` records
+- IPv6 global unicast addresses → `AAAA` records
 
 ## Lifecycle
 
 - When the VMI is **deleted**, the `DNSEndpoint` is automatically garbage-collected (via `OwnerReference`).
 - When the hostname annotation is **removed**, the controller deletes the `DNSEndpoint`.
-- When all Multus IPs are **lost**, the controller deletes the `DNSEndpoint`.
+- When IPs are **not yet available** (VM still starting), the controller skips reconciliation without touching existing records.
 
 ## Deployment
 
 ### 1. Install prerequisites
+
+Optionally install `qemu-guest-agent` inside your VMs to enable richer IP resolution (recommended for IPv6 support):
+
+```bash
+# Debian/Ubuntu
+apt install qemu-guest-agent
+# RHEL/Fedora
+dnf install qemu-guest-agent
+```
 
 Ensure External-DNS is configured with `--source=crd`. Example External-DNS flag:
 
