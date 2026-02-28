@@ -1,0 +1,14 @@
+# Build output
+bin/
+
+# Go test cache
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
