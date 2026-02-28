@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"net"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -11,9 +12,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
@@ -202,10 +206,29 @@ func buildEndpoints(hostnames, ipv4, ipv6 []string, ttl dnsendpointv1alpha1.TTL)
 	return endpoints
 }
 
+// vmiChangedPredicate filters VMI update events to those where either the
+// hostname annotation or the status.interfaces list has actually changed.
+// Create and delete events are always passed through.
+var vmiChangedPredicate = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldVMI, ok1 := e.ObjectOld.(*kubevirtv1.VirtualMachineInstance)
+		newVMI, ok2 := e.ObjectNew.(*kubevirtv1.VirtualMachineInstance)
+		if !ok1 || !ok2 {
+			return true
+		}
+		annotationChanged := oldVMI.Annotations[annotationHostname] != newVMI.Annotations[annotationHostname]
+		interfacesChanged := !reflect.DeepEqual(oldVMI.Status.Interfaces, newVMI.Status.Interfaces)
+		return annotationChanged || interfacesChanged
+	},
+	CreateFunc:  func(e event.CreateEvent) bool { return true },
+	DeleteFunc:  func(e event.DeleteEvent) bool { return true },
+	GenericFunc: func(e event.GenericEvent) bool { return true },
+}
+
 // SetupWithManager registers the controller with the manager.
 func (r *VirtualMachineInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&kubevirtv1.VirtualMachineInstance{}).
+		For(&kubevirtv1.VirtualMachineInstance{}, builder.WithPredicates(vmiChangedPredicate)).
 		Owns(&dnsendpointv1alpha1.DNSEndpoint{}).
 		Complete(r)
 }
