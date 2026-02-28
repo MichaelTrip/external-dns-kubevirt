@@ -65,18 +65,20 @@ func (r *VirtualMachineInstanceReconciler) Reconcile(ctx context.Context, req ct
 		return ctrl.Result{}, err
 	}
 
-	// Check for the mandatory hostname annotation.
-	hostname, ok := vmi.Annotations[annotationHostname]
-	if !ok || strings.TrimSpace(hostname) == "" {
+	// If the hostname annotation is absent, clean up any existing DNSEndpoint.
+	hostname, hasAnnotation := vmi.Annotations[annotationHostname]
+	hostname = strings.TrimSpace(hostname)
+	if !hasAnnotation || hostname == "" {
 		logger.Info("hostname annotation absent, ensuring DNSEndpoint is deleted", "vmi", req.NamespacedName)
 		return ctrl.Result{}, r.deleteEndpointIfExists(ctx, vmi)
 	}
 
-	// Collect IPs from multus-status interfaces.
+	// Annotation is present — collect multus-status IPs.
+	// If none are available yet, do nothing: neither create nor delete.
 	ipv4Addrs, ipv6Addrs := extractMultusIPs(vmi)
 	if len(ipv4Addrs) == 0 && len(ipv6Addrs) == 0 {
-		logger.Info("no multus-status IPs found, ensuring DNSEndpoint is deleted", "vmi", req.NamespacedName)
-		return ctrl.Result{}, r.deleteEndpointIfExists(ctx, vmi)
+		logger.Info("hostname annotation present but no multus-status IPs available yet, skipping", "vmi", req.NamespacedName)
+		return ctrl.Result{}, nil
 	}
 
 	ttl := parseTTL(vmi.Annotations[annotationTTL])
