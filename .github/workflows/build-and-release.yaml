@@ -192,7 +192,7 @@ jobs:
   create-git-tag:
     runs-on: ubuntu-latest
     needs: [determine-tag, build-container]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     permissions:
       contents: write
 
@@ -225,7 +225,7 @@ jobs:
   create-github-release:
     runs-on: ubuntu-latest
     needs: [determine-tag, build-container, create-git-tag]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     permissions:
       contents: write
 
@@ -264,7 +264,7 @@ jobs:
   update-deployment:
     runs-on: ubuntu-latest
     needs: [determine-tag, build-container]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     permissions:
       contents: write
 
