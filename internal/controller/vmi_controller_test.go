@@ -3,10 +3,115 @@ package controller
 import (
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	dnsendpointv1alpha1 "sigs.k8s.io/external-dns/endpoint"
 )
+
+func TestAnnotationNames(t *testing.T) {
+	if annotationHostname != "external-dns.kubernetes.io/hostname" {
+		t.Errorf("unexpected hostname annotation: %q", annotationHostname)
+	}
+	if annotationTTL != "external-dns.kubernetes.io/ttl" {
+		t.Errorf("unexpected TTL annotation: %q", annotationTTL)
+	}
+	if legacyAnnotationHostname != "external-dns.alpha.kubernetes.io/hostname" {
+		t.Errorf("unexpected legacy hostname annotation: %q", legacyAnnotationHostname)
+	}
+	if legacyAnnotationTTL != "external-dns.alpha.kubernetes.io/ttl" {
+		t.Errorf("unexpected legacy TTL annotation: %q", legacyAnnotationTTL)
+	}
+}
+
+func TestPreferredAnnotation(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        string
+		wantOK      bool
+	}{
+		{name: "stable", annotations: map[string]string{annotationHostname: "stable.example.com"}, want: "stable.example.com", wantOK: true},
+		{name: "legacy", annotations: map[string]string{legacyAnnotationHostname: "legacy.example.com"}, want: "legacy.example.com", wantOK: true},
+		{
+			name: "stable takes precedence",
+			annotations: map[string]string{
+				annotationHostname:       "stable.example.com",
+				legacyAnnotationHostname: "legacy.example.com",
+			},
+			want:   "stable.example.com",
+			wantOK: true,
+		},
+		{name: "absent", annotations: nil, want: "", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := preferredAnnotation(tt.annotations, annotationHostname, legacyAnnotationHostname)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("preferredAnnotation() = (%q, %t), want (%q, %t)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestVMIChangedPredicate_AnnotationChanges(t *testing.T) {
+	tests := []struct {
+		name           string
+		oldAnnotations map[string]string
+		newAnnotations map[string]string
+		want           bool
+	}{
+		{
+			name:           "hostname changed",
+			oldAnnotations: map[string]string{annotationHostname: "old.example.com"},
+			newAnnotations: map[string]string{annotationHostname: "new.example.com"},
+			want:           true,
+		},
+		{
+			name:           "TTL changed",
+			oldAnnotations: map[string]string{annotationHostname: "vm.example.com", annotationTTL: "300"},
+			newAnnotations: map[string]string{annotationHostname: "vm.example.com", annotationTTL: "60"},
+			want:           true,
+		},
+		{
+			name:           "legacy hostname changed",
+			oldAnnotations: map[string]string{legacyAnnotationHostname: "old.example.com"},
+			newAnnotations: map[string]string{legacyAnnotationHostname: "new.example.com"},
+			want:           true,
+		},
+		{
+			name: "shadowed legacy hostname changed",
+			oldAnnotations: map[string]string{
+				annotationHostname:       "stable.example.com",
+				legacyAnnotationHostname: "old.example.com",
+			},
+			newAnnotations: map[string]string{
+				annotationHostname:       "stable.example.com",
+				legacyAnnotationHostname: "new.example.com",
+			},
+			want: false,
+		},
+		{
+			name:           "unrelated annotation changed",
+			oldAnnotations: map[string]string{annotationHostname: "vm.example.com", "example.com/key": "old"},
+			newAnnotations: map[string]string{annotationHostname: "vm.example.com", "example.com/key": "new"},
+			want:           false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldVMI := &kubevirtv1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Annotations: tt.oldAnnotations}}
+			newVMI := &kubevirtv1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Annotations: tt.newAnnotations}}
+			got := vmiChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldVMI, ObjectNew: newVMI})
+			if got != tt.want {
+				t.Errorf("Update() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
 
 // ---------- extractGuestAgentIPs ----------
 

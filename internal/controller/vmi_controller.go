@@ -26,9 +26,13 @@ import (
 
 const (
 	// annotationHostname is the External-DNS annotation for hostnames (comma-separated).
-	annotationHostname = "external-dns.alpha.kubernetes.io/hostname"
+	annotationHostname = "external-dns.kubernetes.io/hostname"
+	// legacyAnnotationHostname is retained for backwards compatibility.
+	legacyAnnotationHostname = "external-dns.alpha.kubernetes.io/hostname"
 	// annotationTTL is the External-DNS annotation for record TTL in seconds.
-	annotationTTL = "external-dns.alpha.kubernetes.io/ttl"
+	annotationTTL = "external-dns.kubernetes.io/ttl"
+	// legacyAnnotationTTL is retained for backwards compatibility.
+	legacyAnnotationTTL = "external-dns.alpha.kubernetes.io/ttl"
 	// defaultTTL is used when the TTL annotation is absent or invalid.
 	defaultTTL = dnsendpointv1alpha1.TTL(300)
 	// multusInfoSource is the infoSource value that indicates multus-status IPs.
@@ -73,7 +77,7 @@ func (r *VirtualMachineInstanceReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	// If the hostname annotation is absent, clean up any existing DNSEndpoint.
-	hostname, hasAnnotation := vmi.Annotations[annotationHostname]
+	hostname, hasAnnotation := preferredAnnotation(vmi.Annotations, annotationHostname, legacyAnnotationHostname)
 	hostname = strings.TrimSpace(hostname)
 	if !hasAnnotation || hostname == "" {
 		logger.Info("hostname annotation absent, ensuring DNSEndpoint is deleted", "vmi", req.NamespacedName)
@@ -90,7 +94,8 @@ func (r *VirtualMachineInstanceReconciler) Reconcile(ctx context.Context, req ct
 	}
 	logger.Info("resolved IPs", "vmi", req.NamespacedName, "source", ipSource, "ipv4", ipv4Addrs, "ipv6", ipv6Addrs)
 
-	ttl := parseTTL(vmi.Annotations[annotationTTL])
+	ttlValue, _ := preferredAnnotation(vmi.Annotations, annotationTTL, legacyAnnotationTTL)
+	ttl := parseTTL(ttlValue)
 	hostnames := parseHostnames(hostname)
 	endpoints := buildEndpoints(hostnames, ipv4Addrs, ipv6Addrs, ttl)
 
@@ -222,6 +227,16 @@ func parseHostnames(raw string) []string {
 	return result
 }
 
+// preferredAnnotation returns the stable annotation when present, falling back
+// to its legacy alpha equivalent for backwards compatibility.
+func preferredAnnotation(annotations map[string]string, stableKey, legacyKey string) (string, bool) {
+	if value, ok := annotations[stableKey]; ok {
+		return value, true
+	}
+	value, ok := annotations[legacyKey]
+	return value, ok
+}
+
 // parseTTL converts the TTL annotation string to a dnsendpointv1alpha1.TTL value.
 // Falls back to defaultTTL if the value is absent or not a valid integer.
 func parseTTL(raw string) dnsendpointv1alpha1.TTL {
@@ -260,7 +275,7 @@ func buildEndpoints(hostnames, ipv4, ipv6 []string, ttl dnsendpointv1alpha1.TTL)
 }
 
 // vmiChangedPredicate filters VMI update events to those where either the
-// hostname annotation or the status.interfaces list has actually changed.
+// hostname/TTL annotations or the status.interfaces list has actually changed.
 // The full Interfaces slice comparison covers both iface.IP (multus-status)
 // and iface.IPs (guest-agent) fields. Create and delete events always pass through.
 var vmiChangedPredicate = predicate.Funcs{
@@ -270,7 +285,12 @@ var vmiChangedPredicate = predicate.Funcs{
 		if !ok1 || !ok2 {
 			return true
 		}
-		annotationChanged := oldVMI.Annotations[annotationHostname] != newVMI.Annotations[annotationHostname]
+		oldHostname, oldHasHostname := preferredAnnotation(oldVMI.Annotations, annotationHostname, legacyAnnotationHostname)
+		newHostname, newHasHostname := preferredAnnotation(newVMI.Annotations, annotationHostname, legacyAnnotationHostname)
+		oldTTL, oldHasTTL := preferredAnnotation(oldVMI.Annotations, annotationTTL, legacyAnnotationTTL)
+		newTTL, newHasTTL := preferredAnnotation(newVMI.Annotations, annotationTTL, legacyAnnotationTTL)
+		annotationChanged := oldHostname != newHostname || oldHasHostname != newHasHostname ||
+			oldTTL != newTTL || oldHasTTL != newHasTTL
 		interfacesChanged := !reflect.DeepEqual(oldVMI.Status.Interfaces, newVMI.Status.Interfaces)
 		return annotationChanged || interfacesChanged
 	},

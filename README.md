@@ -4,7 +4,7 @@ A Kubernetes controller that automatically creates and manages [External-DNS](ht
 
 ## How it works
 
-The controller watches all `VirtualMachineInstance` (VMI) resources cluster-wide. When a VMI has the `external-dns.alpha.kubernetes.io/hostname` annotation **and** IP addresses are available from a supported interface source, the controller creates or updates a `DNSEndpoint` CR in the same namespace.
+The controller watches all `VirtualMachineInstance` (VMI) resources cluster-wide. When a VMI has the `external-dns.kubernetes.io/hostname` annotation **and** IP addresses are available from a supported interface source, the controller creates or updates a `DNSEndpoint` CR in the same namespace.
 
 External-DNS reads these `DNSEndpoint` CRs via its built-in `crd` source and manages the actual DNS records in your provider.
 
@@ -38,8 +38,13 @@ Add these annotations to your `VirtualMachineInstance` objects:
 
 | Annotation | Required | Description | Example |
 |---|---|---|---|
-| `external-dns.alpha.kubernetes.io/hostname` | ✅ Yes | Comma-separated list of DNS hostnames to register | `my-vm.example.com` |
-| `external-dns.alpha.kubernetes.io/ttl` | ❌ No | DNS record TTL in seconds (default: `300`) | `60` |
+| `external-dns.kubernetes.io/hostname` | ✅ Yes | Comma-separated list of DNS hostnames to register | `my-vm.example.com` |
+| `external-dns.kubernetes.io/ttl` | ❌ No | DNS record TTL in seconds (default: `300`) | `60` |
+
+The legacy `external-dns.alpha.kubernetes.io/hostname` and
+`external-dns.alpha.kubernetes.io/ttl` annotations remain supported for
+backwards compatibility. When both forms are present, the stable
+`external-dns.kubernetes.io/*` annotation takes precedence.
 
 ### Example VMI
 
@@ -50,8 +55,8 @@ metadata:
   name: my-vm
   namespace: default
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: "my-vm.example.com"
-    external-dns.alpha.kubernetes.io/ttl: "300"
+    external-dns.kubernetes.io/hostname: "my-vm.example.com"
+    external-dns.kubernetes.io/ttl: "300"
 spec:
   # ... VMI spec ...
 ```
