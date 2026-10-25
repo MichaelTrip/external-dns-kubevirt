@@ -81,7 +81,7 @@ func (r *VirtualMachineInstanceReconciler) Reconcile(ctx context.Context, req ct
 	hostname, hasAnnotation := preferredAnnotation(vmi.Annotations, annotationHostname, legacyAnnotationHostname)
 	hostname = strings.TrimSpace(hostname)
 	if !hasAnnotation || hostname == "" {
-		logger.Info("hostname annotation absent, ensuring DNSEndpoint is deleted", "vmi", req.NamespacedName)
+		logger.V(1).Info("Skipping VMI without DNS hostname annotation", "vmi", req.NamespacedName)
 		return ctrl.Result{}, r.deleteEndpointIfExists(ctx, vmi)
 	}
 
@@ -132,7 +132,11 @@ func (r *VirtualMachineInstanceReconciler) deleteEndpointIfExists(ctx context.Co
 	if err != nil {
 		return err
 	}
-	return r.Delete(ctx, endpoint)
+	if err := r.Delete(ctx, endpoint); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	log.FromContext(ctx).Info("Deleted DNSEndpoint because DNS hostname annotation is absent or empty", "vmi", client.ObjectKeyFromObject(vmi))
+	return nil
 }
 
 // extractBestIPs returns IPv4 and IPv6 addresses for the VMI using the best
