@@ -21,7 +21,8 @@ import (
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
-	dnsendpointv1alpha1 "sigs.k8s.io/external-dns/endpoint"
+	dnsendpointv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
+	dnsendpoint "sigs.k8s.io/external-dns/endpoint"
 )
 
 const (
@@ -34,7 +35,7 @@ const (
 	// legacyAnnotationTTL is retained for backwards compatibility.
 	legacyAnnotationTTL = "external-dns.alpha.kubernetes.io/ttl"
 	// defaultTTL is used when the TTL annotation is absent or invalid.
-	defaultTTL = dnsendpointv1alpha1.TTL(300)
+	defaultTTL = dnsendpoint.TTL(300)
 	// multusInfoSource is the infoSource value that indicates multus-status IPs.
 	multusInfoSource = "multus-status"
 	// guestAgentInfoSource is the infoSource value set by the QEMU guest agent.
@@ -237,9 +238,9 @@ func preferredAnnotation(annotations map[string]string, stableKey, legacyKey str
 	return value, ok
 }
 
-// parseTTL converts the TTL annotation string to a dnsendpointv1alpha1.TTL value.
+// parseTTL converts the TTL annotation string to a dnsendpoint.TTL value.
 // Falls back to defaultTTL if the value is absent or not a valid integer.
-func parseTTL(raw string) dnsendpointv1alpha1.TTL {
+func parseTTL(raw string) dnsendpoint.TTL {
 	if raw == "" {
 		return defaultTTL
 	}
@@ -247,26 +248,26 @@ func parseTTL(raw string) dnsendpointv1alpha1.TTL {
 	if err != nil || v <= 0 {
 		return defaultTTL
 	}
-	return dnsendpointv1alpha1.TTL(v)
+	return dnsendpoint.TTL(v)
 }
 
 // buildEndpoints creates Endpoint entries for each record type that has targets.
-func buildEndpoints(hostnames, ipv4, ipv6 []string, ttl dnsendpointv1alpha1.TTL) []*dnsendpointv1alpha1.Endpoint {
-	var endpoints []*dnsendpointv1alpha1.Endpoint
+func buildEndpoints(hostnames, ipv4, ipv6 []string, ttl dnsendpoint.TTL) []*dnsendpoint.Endpoint {
+	var endpoints []*dnsendpoint.Endpoint
 	for _, hostname := range hostnames {
 		if len(ipv4) > 0 {
-			endpoints = append(endpoints, &dnsendpointv1alpha1.Endpoint{
+			endpoints = append(endpoints, &dnsendpoint.Endpoint{
 				DNSName:    hostname,
 				RecordType: "A",
-				Targets:    dnsendpointv1alpha1.Targets(ipv4),
+				Targets:    dnsendpoint.Targets(ipv4),
 				RecordTTL:  ttl,
 			})
 		}
 		if len(ipv6) > 0 {
-			endpoints = append(endpoints, &dnsendpointv1alpha1.Endpoint{
+			endpoints = append(endpoints, &dnsendpoint.Endpoint{
 				DNSName:    hostname,
 				RecordType: "AAAA",
-				Targets:    dnsendpointv1alpha1.Targets(ipv6),
+				Targets:    dnsendpoint.Targets(ipv6),
 				RecordTTL:  ttl,
 			})
 		}
