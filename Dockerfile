@@ -1,5 +1,8 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.27-alpine AS builder
+
+# Honor newer Go requirements introduced by dependency updates.
+ENV GOTOOLCHAIN=auto
 
 WORKDIR /workspace
 

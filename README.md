@@ -167,7 +167,7 @@ kubectl -n external-dns-kubevirt logs -l app.kubernetes.io/name=external-dns-kub
 
 ### Prerequisites
 
-- Go 1.23+
+- Go 1.27+ (version declared in `go.mod`)
 - `kubectl` configured against a cluster
 - Docker (for image builds)
 
