@@ -1,9 +1,14 @@
 version: 2
 updates:
+  # Kubernetes, KubeVirt and controller-runtime must move together.
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
 
