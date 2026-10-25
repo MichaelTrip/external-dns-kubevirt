@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -514,7 +515,7 @@ func TestReconcileDNSEndpointAPI(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-vm", Namespace: "default", UID: types.UID("test-vm-uid"), Annotations: map[string]string{annotationHostname: "vm.example.com"}},
 		Status:     kubevirtv1.VirtualMachineInstanceStatus{Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{{IP: "192.0.2.10", InfoSource: "multus-status"}}},
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(vmi).WithObjects(vmi).Build()
 	r := &VirtualMachineInstanceReconciler{Client: c, Scheme: scheme}
 	key := types.NamespacedName{Name: vmi.Name, Namespace: vmi.Namespace}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
@@ -534,6 +535,32 @@ func TestReconcileDNSEndpointAPI(t *testing.T) {
 	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != vmi.UID {
 		t.Fatalf("missing VMI owner reference: %+v", got.OwnerReferences)
 	}
+	// Reconcile an existing endpoint containing loopback targets from the guest agent.
+	vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+		{IPs: []string{"192.0.2.10", "127.0.0.1", "2001:db8::10", "::1"}, InfoSource: guestAgentInfoSource},
+	}
+	if err := c.Status().Update(context.Background(), vmi); err != nil {
+		t.Fatal(err)
+	}
+	got.Spec.Endpoints[0].Targets = append(got.Spec.Endpoints[0].Targets, "127.0.0.1")
+	got.Spec.Endpoints = append(got.Spec.Endpoints, &dnsendpoint.Endpoint{
+		DNSName: "vm.example.com", RecordType: "AAAA", RecordTTL: 300,
+		Targets: dnsendpoint.Targets{"2001:db8::10", "::1"},
+	})
+	if err := c.Update(context.Background(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Spec.Endpoints) != 2 ||
+		!reflect.DeepEqual(got.Spec.Endpoints[0].Targets, dnsendpoint.Targets{"192.0.2.10"}) ||
+		!reflect.DeepEqual(got.Spec.Endpoints[1].Targets, dnsendpoint.Targets{"2001:db8::10"}) {
+		t.Fatalf("expected loopback targets to be removed: %+v", got.Spec.Endpoints)
+	}
 	var list dnsendpointv1alpha1.DNSEndpointList
 	if err := c.List(context.Background(), &list); err != nil {
 		t.Fatal(err)
@@ -541,4 +568,33 @@ func TestReconcileDNSEndpointAPI(t *testing.T) {
 	if len(list.Items) != 1 {
 		t.Fatalf("expected one listed endpoint, got %d", len(list.Items))
 	}
+}
+
+func TestExtractBestIPs_ExcludesLoopback(t *testing.T) {
+	loopbacks := []string{"127.0.0.1", "127.42.0.2", "::1", "::ffff:127.0.0.1"}
+	for _, source := range []string{guestAgentInfoSource, multusInfoSource} {
+		t.Run(source, func(t *testing.T) {
+			vmi := &kubevirtv1.VirtualMachineInstance{}
+			for _, addr := range append(loopbacks, "172.16.1.150", "2a02:a44d:67b4:420:1ddc:4349:f733:2f60") {
+				vmi.Status.Interfaces = append(vmi.Status.Interfaces, kubevirtv1.VirtualMachineInstanceNetworkInterface{
+					IP: addr, IPs: []string{addr}, InfoSource: source,
+				})
+			}
+			v4, v6, gotSource := extractBestIPs(vmi)
+			if !reflect.DeepEqual(v4, []string{"172.16.1.150"}) || !reflect.DeepEqual(v6, []string{"2a02:a44d:67b4:420:1ddc:4349:f733:2f60"}) || gotSource != source {
+				t.Fatalf("unexpected addresses: v4=%v v6=%v source=%q", v4, v6, gotSource)
+			}
+		})
+	}
+	t.Run("loopback-only guest agent falls back to multus", func(t *testing.T) {
+		vmi := &kubevirtv1.VirtualMachineInstance{}
+		vmi.Status.Interfaces = []kubevirtv1.VirtualMachineInstanceNetworkInterface{
+			{IPs: loopbacks, InfoSource: guestAgentInfoSource},
+			{IP: "172.16.1.150", InfoSource: multusInfoSource},
+		}
+		v4, v6, source := extractBestIPs(vmi)
+		if !reflect.DeepEqual(v4, []string{"172.16.1.150"}) || len(v6) != 0 || source != multusInfoSource {
+			t.Fatalf("unexpected fallback: v4=%v v6=%v source=%q", v4, v6, source)
+		}
+	})
 }

@@ -160,7 +160,7 @@ func extractBestIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []string
 
 // extractGuestAgentIPs returns IPv4 and IPv6 addresses from interfaces whose
 // infoSource contains "guest-agent", using the full iface.IPs list.
-// Link-local IPv6 addresses (fe80::/10) are skipped.
+// Loopback addresses and link-local IPv6 addresses (fe80::/10) are skipped.
 func extractGuestAgentIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []string) {
 	for _, iface := range vmi.Status.Interfaces {
 		if !containsInfoSource(iface.InfoSource, guestAgentInfoSource) {
@@ -172,7 +172,7 @@ func extractGuestAgentIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []
 				continue
 			}
 			ip := net.ParseIP(addr)
-			if ip == nil {
+			if ip == nil || ip.IsLoopback() {
 				continue
 			}
 			if ip.To4() != nil {
@@ -187,6 +187,7 @@ func extractGuestAgentIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []
 
 // extractMultusIPs returns IPv4 and IPv6 addresses from interfaces whose
 // infoSource contains "multus-status", using the single iface.IP field.
+// Loopback addresses are skipped.
 func extractMultusIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []string) {
 	for _, iface := range vmi.Status.Interfaces {
 		if !containsInfoSource(iface.InfoSource, multusInfoSource) {
@@ -197,7 +198,7 @@ func extractMultusIPs(vmi *kubevirtv1.VirtualMachineInstance) (ipv4, ipv6 []stri
 			continue
 		}
 		ip := net.ParseIP(addr)
-		if ip == nil {
+		if ip == nil || ip.IsLoopback() {
 			continue
 		}
 		if ip.To4() != nil {

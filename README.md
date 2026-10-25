@@ -96,6 +96,8 @@ The controller selects IP addresses using a two-source priority scheme based on 
 | 1 (preferred) | `guest-agent` | `iface.IPs` (full list) | Available when `qemu-guest-agent` is installed in the VM. Link-local IPv6 (`fe80::/10`) addresses are skipped. |
 | 2 (fallback) | `multus-status` | `iface.IP` (single IP) | Always available when Multus CNI is configured. |
 
+Loopback addresses (`127.0.0.0/8` and `::1`, including IPv4-mapped forms) are excluded from both sources.
+
 The `infoSource` field can contain multiple comma-separated values (e.g. `domain, guest-agent, multus-status`). The controller checks for each source independently.
 
 ### Why prefer the guest-agent?
