@@ -1,13 +1,20 @@
 package controller
 
 import (
+	"context"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	dnsendpointv1alpha1 "sigs.k8s.io/external-dns/apis/v1alpha1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	dnsendpointv1alpha1 "sigs.k8s.io/external-dns/endpoint"
+	dnsendpoint "sigs.k8s.io/external-dns/endpoint"
 )
 
 func TestAnnotationNames(t *testing.T) {
@@ -401,7 +408,7 @@ func TestParseHostnames(t *testing.T) {
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
 		raw  string
-		want dnsendpointv1alpha1.TTL
+		want dnsendpoint.TTL
 	}{
 		{"", defaultTTL},
 		{"300", 300},
@@ -424,7 +431,7 @@ func TestBuildEndpoints_BothRecordTypes(t *testing.T) {
 	hostnames := []string{"vm.example.com"}
 	ipv4 := []string{"192.168.1.1"}
 	ipv6 := []string{"2001:db8::1"}
-	ttl := dnsendpointv1alpha1.TTL(300)
+	ttl := dnsendpoint.TTL(300)
 
 	eps := buildEndpoints(hostnames, ipv4, ipv6, ttl)
 	if len(eps) != 2 {
@@ -491,5 +498,47 @@ func TestBuildEndpoints_TTL(t *testing.T) {
 	}
 	if eps[0].RecordTTL != 120 {
 		t.Errorf("expected TTL=120, got %d", eps[0].RecordTTL)
+	}
+}
+
+// Exercise the API objects as well as endpoint values after upstream split the packages.
+func TestReconcileDNSEndpointAPI(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := kubevirtv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddDNSEndpointToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	vmi := &kubevirtv1.VirtualMachineInstance{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-vm", Namespace: "default", UID: types.UID("test-vm-uid"), Annotations: map[string]string{annotationHostname: "vm.example.com"}},
+		Status:     kubevirtv1.VirtualMachineInstanceStatus{Interfaces: []kubevirtv1.VirtualMachineInstanceNetworkInterface{{IP: "192.0.2.10", InfoSource: "multus-status"}}},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vmi).Build()
+	r := &VirtualMachineInstanceReconciler{Client: c, Scheme: scheme}
+	key := types.NamespacedName{Name: vmi.Name, Namespace: vmi.Namespace}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	var got dnsendpointv1alpha1.DNSEndpoint
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Spec.Endpoints) != 1 {
+		t.Fatalf("expected one endpoint, got %v", got.Spec.Endpoints)
+	}
+	ep := got.Spec.Endpoints[0]
+	if ep.DNSName != "vm.example.com" || ep.RecordType != "A" || len(ep.Targets) != 1 || ep.Targets[0] != "192.0.2.10" {
+		t.Fatalf("unexpected DNS record: %+v", ep)
+	}
+	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].UID != vmi.UID {
+		t.Fatalf("missing VMI owner reference: %+v", got.OwnerReferences)
+	}
+	var list dnsendpointv1alpha1.DNSEndpointList
+	if err := c.List(context.Background(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected one listed endpoint, got %d", len(list.Items))
 	}
 }
